@@ -156,12 +156,48 @@ def infer_shape(text):
     return (n, w) if (n, w) in ((4, 5), (4, 7), (8, 5), (8, 7)) else None
 
 
+POETRY_TYPES = [
+    (10, "唐诗",     "唐诗",     None, None, "诗"),
+    (11, "五言绝句", "唐诗",       4,  5, "四句，每句五字"),
+    (12, "七言绝句", "唐诗",       4,  7, "四句，每句七字"),
+    (13, "五言律诗", "唐诗",       8,  5, "八句，每句五字"),
+    (14, "七言律诗", "唐诗",       8,  7, "八句，每句七字"),
+    (15, "五言古诗", "唐诗",     None,  5, "不限句数，每句五字"),
+    (16, "七言古诗", "唐诗",     None,  7, "不限句数，每句七字"),
+    (17, "乐府诗",   "唐诗",     None, None, "不限句数，不限字数"),
+    (20, "宋词",     "宋词",     None, None, "长短句"),
+    (21, "五代词",   "词",       None, None, "长短句"),
+    (30, "元曲",     "曲",       None, None, "散曲"),
+    (40, "蒙学",     "蒙学",     None, None, "蒙学"),
+    (50, "诗经",     "诗经",     None, None, "诗经"),
+    (60, "论语",     "论语",     None, None, "论语"),
+    (70, "楚辞",     "楚辞",     None, None, "楚辞"),
+    (80, "四书五经", "四书五经", None, None, "四书五经"),
+    (99, "其他",     "其他",     None, None, "不规则或其他形式"),
+]
+
+
 def create_schema(con):
     con.executescript(SCHEMA)
     now = "2026-10-09T00:00:00+00:00"
     for tbl in ("dynasties_zh_hans", "dynasties_zh_hant"):
         con.executemany(f"INSERT INTO {tbl} VALUES (?,?,?,?,?,?)",
                         [(*r, now) for r in DYNASTIES])
+    # 体裁表必须由 schema 自带种子。--cp-json 分支不再从旧库拷贝 poetry_types，
+    # 少了这一步，宋词/元曲/诗经等「固定体裁 id」全会变成孤儿引用
+    # —— 曾因此错 32,996 首（宋词 21,017 + 元曲 10,891 + …）。
+    try:
+        import zhconv
+        conv = lambda s: zhconv.convert(s, "zh-hant")
+    except ImportError:
+        conv = lambda s: s
+    for tbl in ("poetry_types_zh_hans", "poetry_types_zh_hant"):
+        cvt = (lambda s: s) if tbl.endswith("zh_hans") else conv
+        con.executemany(
+            f"INSERT OR IGNORE INTO {tbl} "
+            "(id,name,category,lines,chars_per_line,description,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [(i, cvt(n), cvt(c), l, w, d, now) for i, n, c, l, w, d in POETRY_TYPES])
 
 
 def ingest_poetry_db(con, old_path):
@@ -186,6 +222,217 @@ def ingest_poetry_db(con, old_path):
     con.commit()                       # 不 commit 的话 DETACH 会报 database is locked
     con.execute("DETACH DATABASE old")
     return out
+
+
+# ---------------------------------------------------------------- 源 A（推荐）：chinese-poetry 原始 JSON，MIT
+#
+# 这是 v0.2.0 起的唯一唐宋来源。为什么不用 palemoky 的 poetry.db：
+# 那个仓库是 GPL-3.0，其 poetry.db 是 GPL 项目的 dist 产物（见 NOTICE.md）。
+# 直接从 MIT 原始 JSON 构建，彻底没有这个问题。
+#
+# 关键：朝代由**文件名**决定，不靠猜。
+#   全唐诗/ 目录名是「全唐诗」，里面却躺着 256 个 poet.song.*.json（全宋诗）
+#   和只有 59 个 poet.tang.*.json —— 按目录名判朝代就是把宋诗全标成唐。
+CP_SOURCES = [
+    # (相对 glob, 朝代id, 体裁id 或 None, 说明)
+    ("全唐诗/poet.tang.*.json", 6, None, "全唐诗"),
+    ("全唐诗/poet.song.*.json", 8, None, "全宋诗"),
+    ("御定全唐詩/json/*.json", 6, None, "御定全唐詩"),
+    ("宋词/ci.song.*.json", 8, 20, "宋词"),
+    ("元曲/yuanqu.json", 9, 30, "元曲"),
+    ("诗经/shijing.json", 1, 50, "诗经"),
+    ("楚辞/chuci.json", 1, 70, "楚辞"),
+    ("论语/lunyu.json", 1, 60, "论语"),
+    ("四书五经/*.json", 1, 80, "四书五经"),
+    ("五代诗词/huajianji/huajianji-*-juan.json", 7, 21, "花间集"),
+    ("五代诗词/nantang/poetrys.json", 7, 21, "南唐二主词"),
+    ("纳兰性德/*.json", 10, 20, "纳兰词"),
+    ("曹操诗集/caocao.json", 3, None, "曹操诗集"),
+]
+TEXT_KEYS = ("paragraphs", "content", "para")   # 三种文本键，形态各异
+_CHILD_KEYS = ("content", "chapters", "poems", "poetrys", "juan", "data")
+
+# ---------------------------------------------------------------- 勘误表
+# 上游数据自带的错字，逐条登记、逐条修，不做宽泛的批量替换。
+# 已经查出并上报上游的错字列在这里，重建时自动应用 —— 勘误本身也是本项目的成果。
+ERRATA = [
+    # chinese-poetry 御定全唐詩/json/056.json 自带错字：
+    # 王勃《送杜少府之任蜀州》「海記憶體知己」→ 应为「海內存知己」。
+    # 明显是「內存→記憶體」这类机翻用词替换的残留。
+    ("海記憶體知己", "海內存知己"),
+    ("海记忆体知己", "海内存知己"),
+]
+
+
+def apply_errata(paras):
+    """对每段文本应用勘误表。在简繁转换**之前**应用，两种字形都受益。"""
+    out = []
+    for p in paras:
+        for wrong, right in ERRATA:
+            if wrong in p:
+                p = p.replace(wrong, right)
+        out.append(p)
+    return out
+
+
+# ---------------------------------------------------------------- 朝代归位
+SOUTH_TANG = ("李煜", "李璟")     # 南唐二主
+DYNASTY_WUDAI = 7
+
+
+def fix_south_tang(con):
+    """南唐二主归位到五代。
+
+    《全唐诗》《御定全唐詩》把南唐君臣的作品也编进「唐」里（卷889 之后），
+    但李煜、李璟明确属于五代十国的南唐。**只动这两位**——
+    花间集其他词人（温庭筠等）归唐是通行惯例，不碰。
+    """
+    rep = {}
+    for lang in ("zh_hans", "zh_hant"):
+        ph = ",".join("?" * len(SOUTH_TANG))
+        ids = [r[0] for r in con.execute(
+            f"SELECT id FROM authors_{lang} WHERE name IN ({ph})", SOUTH_TANG)]
+        if not ids:
+            continue
+        ip = ",".join("?" * len(ids))
+        cur = con.execute(
+            f"UPDATE poems_{lang} SET dynasty_id=? WHERE dynasty_id<>? AND author_id IN ({ip})",
+            (DYNASTY_WUDAI, DYNASTY_WUDAI, *ids))
+        rep[f"poems_{lang}"] = cur.rowcount
+        con.execute(f"UPDATE authors_{lang} SET dynasty_id=? WHERE id IN ({ip})",
+                    (DYNASTY_WUDAI, *ids))
+    con.commit()
+    return rep
+
+
+def _clean_author(a):
+    """去掉作者名里的朝代前缀/括号：'（唐）孟浩然' → '孟浩然'"""
+    if not a:
+        return a
+    a = re.sub(r"^[（(][^）)]{1,4}[）)]", "", a.strip())
+    return a.strip() or None
+
+
+def extract_records(obj, ctx, out):
+    """从任意嵌套的 JSON 结构里抽取 (title, author, paragraphs)。
+
+    chinese-poetry 各目录格式不统一（paragraphs / content / para，
+    有的还嵌 chapter），与其一目录写一个解析器，不如用容错递归抽取一次吃掉。
+    authors.*.json 这类没有文本键的文件自然抽不出东西，自动被忽略。
+    """
+    if isinstance(obj, list):
+        for x in obj:
+            extract_records(x, ctx, out)
+        return
+    if not isinstance(obj, dict):
+        return
+    title = (obj.get("title") or obj.get("rhythmic")     # 宋词的词牌在 rhythmic 字段
+             or obj.get("chapter") or ctx.get("title"))
+    author = _clean_author(obj.get("author") or ctx.get("author"))
+    for k in TEXT_KEYS:
+        v = obj.get(k)
+        if isinstance(v, list) and v and all(isinstance(i, str) for i in v):
+            paras = [s.strip() for s in v if isinstance(s, str) and s.strip()]
+            if paras:
+                out.append((title, author, paras, obj.get("rhythmic")))
+            break
+    for k in _CHILD_KEYS:
+        v = obj.get(k)
+        if isinstance(v, (list, dict)):
+            extract_records(v, {"title": title, "author": author}, out)
+
+
+def ingest_chinese_poetry_json(con, cp_dir, to_hant=False):
+    """源 A（MIT 原始 JSON）→ 简繁双表。朝代按文件名定，不再需要事后修补。"""
+    if not os.path.isdir(cp_dir):
+        sys.exit(f"找不到 chinese-poetry 源码目录：{cp_dir}")
+    try:
+        import zhconv
+    except ImportError:
+        sys.exit("需要 zhconv：pip install zhconv")
+
+    type_by_shape = {(l, c): i for i, l, c in con.execute(
+        "SELECT id, lines, chars_per_line FROM poetry_types_zh_hans "
+        "WHERE lines IS NOT NULL")}
+    type_by_name = {n: i for i, n in con.execute("SELECT id, name FROM poetry_types_zh_hans")}
+
+    name2id, next_aid = {}, 1 + max(
+        con.execute("SELECT max(id) FROM authors_zh_hans").fetchone()[0] or 0,
+        con.execute("SELECT max(id) FROM authors_zh_hant").fetchone()[0] or 0)
+    next_pid = (con.execute("SELECT max(id) FROM poems_zh_hans").fetchone()[0] or 0) + 1
+    next_pid_h = (con.execute("SELECT max(id) FROM poems_zh_hant").fetchone()[0] or 0) + 1
+    now = "2026-10-09T00:00:00+00:00"
+    seen_h, seen_t = set(), set()
+    stat = {"files": 0, "rows": 0, "ins": 0, "dup": 0, "n_auth": 0, "by": {}}
+
+    for pattern, did, tid_fixed, label in CP_SOURCES:
+        files = sorted(glob.glob(os.path.join(cp_dir, pattern)))
+        if not files:
+            print(f"  ⚠️ 未匹配：{pattern}")
+            continue
+        n_before = stat["ins"]
+        for path in files:
+            stat["files"] += 1
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                print(f"  ⚠️ 跳过损坏文件 {os.path.basename(path)}：{e}")
+                continue
+            recs = []
+            extract_records(data, {}, recs)
+            for title, author, paras_src, rhythmic in recs:
+                stat["rows"] += 1
+                # 简繁双向归一：源码本身简繁混杂（全唐诗是繁体、宋词是简体）。
+                # 用 zh-hans/zh-hant 字符级直转，绝不用 s2twp 那种短语表 ——
+                # 短语表会把现代词汇一并替换，正是「內存→記憶體」这类错的来源。
+                ph = [zhconv.convert(p, "zh-hans") for p in apply_errata(paras_src)]
+                pt = [zhconv.convert(p, "zh-hant") for p in apply_errata(paras_src)]
+                hh, ht = chash(ph), chash(pt)
+                if hh in seen_h:
+                    stat["dup"] += 1
+                    continue
+                seen_h.add(hh)
+                seen_t.add(ht)
+                author = author or "无名氏"
+                if author not in name2id:
+                    con.execute("""INSERT INTO authors_zh_hans
+                        (id,name,dynasty_id,description,created_at,source,name_en,name_orig)
+                        VALUES (?,?,?,?,?,'chinese-poetry',NULL,NULL)""",
+                        (next_aid, zhconv.convert(author, "zh-hans"), did, None, now))
+                    con.execute("""INSERT INTO authors_zh_hant
+                        (id,name,dynasty_id,description,created_at,source,name_en,name_orig)
+                        VALUES (?,?,?,?,?,'chinese-poetry',NULL,NULL)""",
+                        (next_aid, zhconv.convert(author, "zh-hant"), did, None, now))
+                    name2id[author] = next_aid
+                    next_aid += 1
+                    stat["n_auth"] += 1
+                tid = tid_fixed if tid_fixed else type_by_shape.get(infer_shape("".join(paras_src)))
+                if rhythmic and not tid:
+                    tid = type_by_name.get("宋词")
+                con.execute("""INSERT INTO poems_zh_hans
+                    (id,type_id,title,content,content_hash,author_id,dynasty_id,created_at,
+                     source,period_orig,lang_original)
+                    VALUES (?,?,?,?,?,?,?,?,'chinese-poetry',?,'zh-Hans')""",
+                    (next_pid, tid, zhconv.convert(title or "", "zh-hans") or "无题",
+                     json.dumps(ph, ensure_ascii=False), hh, name2id[author], did, now, label))
+                next_pid += 1
+                stat["ins"] += 1
+                if ht not in ("", None):
+                    con.execute("""INSERT OR IGNORE INTO poems_zh_hant
+                        (id,type_id,title,content,content_hash,author_id,dynasty_id,created_at,
+                         source,period_orig,lang_original)
+                        VALUES (?,?,?,?,?,?,?,?,'chinese-poetry',?,'zh-Hant')""",
+                        (next_pid_h, tid, zhconv.convert(title or "", "zh-hant") or "無題",
+                         json.dumps(pt, ensure_ascii=False), ht, name2id[author], did, now, label))
+                    next_pid_h += 1
+            if stat["ins"] % 40000 == 0 and stat["ins"] != n_before:
+                con.commit()
+                print(f"    … {stat['ins']:,} 首", flush=True)
+        stat["by"][label] = stat["ins"] - n_before
+        print(f"  {label:<14}{stat['by'][label]:>8,} 首", flush=True)
+    con.commit()
+    return stat
 
 
 def ingest_werneror(con, csv_dir, to_hant=False):
@@ -305,11 +552,14 @@ def ingest_werneror(con, csv_dir, to_hant=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--old", required=True, help="已修补的 poetry.db")
+    ap.add_argument("--cp-json", help="chinese-poetry 源码目录（MIT 原始 JSON）★推荐")
+    ap.add_argument("--old", help="已修补的 poetry.db（GPL 产物，已弃用，仅为兼容保留）")
     ap.add_argument("--werneror", required=True, help="Werneror CSV 目录")
     ap.add_argument("--out", default="data/baichuan.db")
     ap.add_argument("--to-hant", action="store_true", help="同时生成繁体版（zh-hant 直转）")
     a = ap.parse_args()
+    if not a.cp_json and not a.old:
+        ap.error("需要 --cp-json（推荐）或 --old")
 
     if os.path.exists(a.out):
         os.remove(a.out)
@@ -321,13 +571,25 @@ def main():
 
     print("① 建 schema …")
     create_schema(con)
-    print("② 导入 chinese-poetry …")
-    r1 = ingest_poetry_db(con, a.old)
-    print(f"   简体 {r1['zh_hans']:,} ｜ 繁体 {r1['zh_hant']:,}")
+    if a.cp_json:
+        print("② 导入 chinese-poetry（MIT 原始 JSON）…")
+        r1 = ingest_chinese_poetry_json(con, a.cp_json, a.to_hant)
+        print(f"   读入 {r1['rows']:,} 条 ｜ 入库 {r1['ins']:,} ｜ 重复 {r1['dup']:,}"
+              f" ｜ 新作者 {r1['n_auth']:,} ｜ 文件 {r1['files']:,}")
+    else:
+        print("② 导入 chinese-poetry …")
+        print("   ⚠️  --old 走的是 palemoky/chinese-poetry-api 的 poetry.db，")
+        print("       那是 GPL-3.0 项目的 dist 产物。v0.2.0 起请改用 --cp-json（MIT 原始 JSON）。")
+        r1 = ingest_poetry_db(con, a.old)
+        print(f"   简体 {r1['zh_hans']:,} ｜ 繁体 {r1['zh_hant']:,}")
     print("③ 导入 Werneror/Poetry …")
     r2 = ingest_werneror(con, a.werneror, a.to_hant)
     print(f"   读入 {r2['rows']:,} 行 ｜ 入库 {r2['ins']:,} ｜ 哈希重复 {r2['dup']:,}"
           f" ｜ 坏行 {r2['bad']:,} ｜ 新建作者 {r2['new_authors']:,}")
+    r3 = fix_south_tang(con)
+    if any(r3.values()):
+        print("③.5 南唐二主归位五代："
+              + " ｜ ".join(f"{k} {v:,} 首" for k, v in r3.items()))
     print("④ 建索引 …")
     con.executescript(INDEXES)
     con.commit()

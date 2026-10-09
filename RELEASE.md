@@ -2,7 +2,41 @@
 
 数据库不入 git（1.1 GB，超过 GitHub 单文件 100 MB 限制），以 **Release 附件** 发布。
 
-## 附件
+---
+
+## v0.2.0 —— 授权彻底干净版（2026-10-09）
+
+**这一版最重要的变化不是数据变多，而是授权链彻底干净了。**
+
+| | v0.1.0 | **v0.2.0** |
+|---|---|---|
+| 唐宋来源 | `palemoky/chinese-poetry-api`（**GPL-3.0**）的 `poetry.db` 产物 | **chinese-poetry 原始 JSON（MIT）** |
+| GPL 产物 | ⚠️ 含 | ✅ **完全不含** |
+| 朝代判定 | 导入后事后修补 25 万首 | **导入时按文件名判**，从源头不错 |
+| 上游错字 | 未修 | 勘误表修掉「海記憶體」 |
+
+**v0.2.0 构建命令（可复现）：**
+
+```bash
+git clone --depth 1 https://github.com/chinese-poetry/chinese-poetry.git
+python tools/ingest.py --cp-json ./chinese-poetry \
+  --werneror <Werneror CSVs> --out data/baichuan.db --to-hant
+```
+
+### 附件（v0.2.0）
+
+| 文件 | 大小 | sha256 |
+|---|---|---|
+| `baichuan.db.gz` | 462 MB（原库 1,118 MB，压缩比 2.42:1） | `806d63f301844820db18d529532f939a93822f9716faf43d1060d813c84911b2` |
+
+解压后 `baichuan.db` 的 sha256 应为
+`a1aad50f264514a0fcc58e7eb666ca7ba492f72af8f4f869149a58f03baf88a4`
+
+---
+
+## v0.1.0 —— 首次发布
+
+### 附件
 
 | 文件 | 大小 | sha256 |
 |---|---|---|
