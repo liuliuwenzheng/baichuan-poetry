@@ -1,0 +1,20 @@
+# 构建产物（1.1 GB）不入 git —— 见 README「快速开始」自行构建，或从 Release 下载
+data/*.db
+data/fix_log*.json
+data/keywords.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 上游原始数据
+*.csv
+poetry.db
+poetry.db.gz
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/
