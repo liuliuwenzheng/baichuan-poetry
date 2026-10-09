@@ -320,7 +320,8 @@ class Local:
             # 悄悄给一个「0 结果」或一个 traceback，都是在骗人。
             if not like and len(q) >= 3 and not self.has_fts:
                 sys.stderr.write(
-                    "提示：这个库没建全文索引，已改用 LIKE 子串扫描（结果完整，稍慢）。\n"
+                    "提示：这个库没建全文索引，已改用 LIKE 子串扫描"
+                    "（结果完整，只是稍慢；且按 id 排序、没有相关性排序）。\n"
                     "      建索引：python tools/build_search.py（约 15 分钟，库会大 2 GB）\n")
             w = ["(p.content LIKE ? OR p.title LIKE ?)"] + gw
             return self._poems(" AND ".join(w),
