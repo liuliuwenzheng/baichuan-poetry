@@ -4,6 +4,60 @@
 
 ---
 
+## v0.3.0 —— 架构正交版（2026-10-09）
+
+**这一版数据条数没变，修的是「模型」：两个维度被压成一维、两套 id 各自为政。**
+
+| 病灶 | v0.2.0 | **v0.3.0** |
+|---|---|---|
+| 体裁与朝代 | 体裁名写成「唐诗」「宋词」「五代词」，两个维度压进一个字段 | **独立 `genres_*` 体裁轴**，与 `dynasty_id` 正交可组合 |
+| 清词归类 | 纳兰性德 257 首清词挂在「宋词」下 | 归「词」，朝代 = 清 |
+| 查「所有词」 | 硬编码 `type_id IN (20,21)`，来新朝代会崩 | `genre_id = 2`，一行搞定 |
+| 词牌/曲牌 | 没有这一列 | `tune` 列：词 42,254 首（99.4%）、曲 8,698 首（79.9%） |
+| 简繁两表 id | 各自开计数器 → **错位 25,294 个**（#400000 简《荒村》对繁《心雲詩…》） | **同 id 镜像**，行数恒等 993,753 / 993,753 |
+| 繁体库行数 | 968,459（比简体少 25,294） | 993,753（与简体恒等） |
+| 自动校验 | 无 | **`tools/verify.py`**：26 条断言，含「体裁名不得含朝代名」「两表 id 一一对应」 |
+
+`type_id` 名字同时去朝代化：10「唐诗」→ 10「诗」，20「宋词」→ 20「词」，21「五代词」并入 20。
+
+### 正交之后能查什么
+
+```bash
+python query/poem.py --db data/baichuan.db genres            # 看体裁轴
+python query/poem.py --db data/baichuan.db random --genre 词              # 所有词，不分朝代
+python query/poem.py --db data/baichuan.db random --genre 诗 --dynasty 唐  # 唐诗
+python query/poem.py --db data/baichuan.db random --genre 词 --dynasty 清  # 清词
+```
+
+| 组合 | 数量 |
+|---|---|
+| 诗 | 939,928（跨 17 个朝代） |
+| 词 | 42,511（跨 13 个朝代） |
+| 唐诗 / 宋诗 | 88,507 / 366,750 |
+| 宋词 / 清词 | 23,362 / 8,579 |
+| 《水调歌头》全库 | 宋 789 / 近现代 78 / 清 68 / 元 56 / 金 11 / 当代 30 … |
+
+### 构建命令（可复现）
+
+```bash
+git clone --depth 1 https://github.com/chinese-poetry/chinese-poetry.git
+git clone --depth 1 https://github.com/Werneror/Poetry.git
+python tools/ingest.py --cp-json ./chinese-poetry \
+  --werneror ./Poetry --out data/baichuan.db --to-hant   # 约 125s
+python tools/verify.py                                   # 26 条断言，全绿才算过
+```
+
+### 附件（v0.3.0）
+
+| 文件 | 大小 | sha256 |
+|---|---|---|
+| `baichuan.db.gz` | 476,093,085 B（原库 1,196,482,560 B，压缩比 2.51:1） | `ca84c3e03d64037439c1848b73932946607222c6ede8e074c0b56f2f25af1ade` |
+
+解压后 `baichuan.db` 的 sha256 应为
+`22e96f1a19a9781cb169b7dcfc49dfad57c108e9a115dbf8ce17056fe224a8e0`
+
+---
+
 ## v0.2.0 —— 授权彻底干净版（2026-10-09）
 
 **这一版最重要的变化不是数据变多，而是授权链彻底干净了。**

@@ -145,8 +145,16 @@ def fmt(poem, show_meta=True):
     if show_meta:
         au = (poem.get("author") or {}).get("name") or "佚名"
         dy = (poem.get("dynasty") or {}).get("name") or ""
+        gn = (poem.get("genre") or {}).get("name") or ""
         ty = (poem.get("type") or {}).get("name") or ""
-        tag = " · ".join(x for x in (dy, au, ty) if x)
+        tune = poem.get("tune") or ""
+        # 体裁轴（诗/词/曲）与形式（五言绝句/七言律诗）是两个维度：
+        # 形式只在比体裁更具体时才显示，免得出现「词 · 词」这种重复。
+        form = ty if (ty and ty != gn) else ""
+        parts = [dy, au, gn, form]
+        if tune and tune not in (gn, form):
+            parts.append(f"「{tune}」")   # 词牌/曲牌 —— 跨朝代查「所有《水调歌头》」就靠它
+        tag = " · ".join(x for x in parts if x)
         out[0] = f"《{head}》  [{tag}]  #{poem.get('id','')}"
     out += ["  " + str(l) for l in lines]
     return "\n".join(out)
@@ -172,30 +180,89 @@ class Local:
     def _rows(self, sql, args=()):
         return [dict(r) for r in self.db.execute(sql, args)]
 
+    def _genre_cols(self):
+        """能力探测：体裁轴（genre_id / tune）是百川 v0.3.0 才有的列。
+
+        旧库（chinese-poetry-api 的 poetry.db）没有这两列。这里做探测，
+        保证**同一份 CLI 对新旧库都能用** —— 不能升级了就不认旧库。
+        """
+        if not hasattr(self, "_gcache"):
+            try:
+                cols = {r[1] for r in self.db.execute(
+                    f"PRAGMA table_info(poems_{self.lang})")}
+            except Exception:
+                cols = set()
+            self._gcache = ("genre_id" in cols, "tune" in cols)
+        return self._gcache
+
+    def _genre_select(self):
+        """返回 (额外 SELECT 列, 额外 JOIN)。旧库上两者都是空。"""
+        has_g, has_t = self._genre_cols()
+        parts, joins = [], []
+        if has_g:
+            parts.append("g.name AS genre_name, g.id AS genre_id")
+            joins.append(f"LEFT JOIN genres_{self.lang} g ON g.id = p.genre_id")
+        if has_t:
+            parts.append("p.tune AS tune")
+        return parts, joins
+
+    def _genre_id(self, name):
+        """体裁名 → id。支持「诗」「词」「曲」等；旧库或不识别的返回 None。
+
+        繁体库里体裁名是「詩/詞/曲」，所以简体输入要先转一次再查 ——
+        接口不应该逼用户记住自己在用哪个文字版本。
+        """
+        if not name or not self._genre_cols()[0]:
+            return None
+        r = self.db.execute(f"SELECT id FROM genres_{self.lang} WHERE name=?", (name,)).fetchone()
+        if r:
+            return r[0]
+        try:
+            import zhconv
+            alt = zhconv.convert(name, "zh-hans" if self.lang == "zh_hans" else "zh-hant")
+        except ImportError:
+            return None
+        if alt and alt != name:
+            r = self.db.execute(f"SELECT id FROM genres_{self.lang} WHERE name=?",
+                                (alt,)).fetchone()
+            if r:
+                return r[0]
+        return None
+
+    def _decorate(self, r):
+        """把一行拼成返回用的 dict，体裁轴按能力探测结果决定要不要带。"""
+        keys = set(r.keys())
+        d = {
+            "id": r["id"], "title": r["title"],
+            "content": json.loads(r["content"]),
+            "author": {"id": r["author_id"], "name": r["author_name"]},
+            "dynasty": {"id": r["dynasty_id"], "name": r["dynasty_name"]},
+            "type": {"id": r["type_id"], "name": r["type_name"]},
+        }
+        if "genre_id" in keys:
+            d["genre"] = {"id": r["genre_id"], "name": r["genre_name"]}
+        if "tune" in keys and r["tune"]:
+            d["tune"] = r["tune"]
+        return d
+
     def _poems(self, where="1=1", args=(), limit=1, order="RANDOM()"):
         lang = self.lang
+        extra, joins = self._genre_select()
+        sel = ",\n               ".join(["p.id, p.title, p.content",
+              "a.name AS author_name, a.id AS author_id",
+              "d.name AS dynasty_name, d.id AS dynasty_id",
+              "t.name AS type_name, t.id AS type_id"] + extra)
         sql = f"""
-        SELECT p.id, p.title, p.content,
-               a.name AS author_name, a.id AS author_id,
-               d.name AS dynasty_name, d.id AS dynasty_id,
-               t.name AS type_name, t.id AS type_id
+        SELECT {sel}
         FROM poems_{lang} p
         LEFT JOIN authors_{lang} a ON a.id = p.author_id
         LEFT JOIN dynasties_{lang} d ON d.id = p.dynasty_id
         LEFT JOIN poetry_types_{lang} t ON t.id = p.type_id
+        {' '.join(joins)}
         WHERE {where} ORDER BY {order} LIMIT ?"""
-        out = []
-        for r in self._rows(sql, tuple(args) + (limit,)):
-            out.append({
-                "id": r["id"], "title": r["title"],
-                "content": json.loads(r["content"]),
-                "author": {"id": r["author_id"], "name": r["author_name"]},
-                "dynasty": {"id": r["dynasty_id"], "name": r["dynasty_name"]},
-                "type": {"id": r["type_id"], "name": r["type_name"]},
-            })
-        return out
+        return [self._decorate(r) for r in self._rows(sql, tuple(args) + (limit,))]
 
-    def random(self, author=None, type_=None, dynasty=None, char=None, limit=1):
+    def random(self, author=None, type_=None, dynasty=None, char=None, limit=1, genre=None):
         self._ensure()
         lang = self.lang
         w, a = [], []
@@ -211,18 +278,34 @@ class Local:
         if type_:
             w.append("t.name = ?")
             a.append(type_)
+        if genre:
+            gid = self._genre_id(genre)
+            if gid is None:
+                raise SystemExit(f"没有这个体裁：{genre}"
+                                 "（可用：诗 / 词 / 曲 / 诗经 / 楚辞 / 论语 / 蒙学 / 四书五经 / 其他）")
+            w.append("p.genre_id = ?")
+            a.append(gid)
         return self._poems(" AND ".join(w) if w else "1=1", a, limit)
 
     def _ensure(self):
         pass
 
-    def search(self, q, limit=10, like=False, type_=None):
+    def search(self, q, limit=10, like=False, type_=None, genre=None):
         lang = self.lang
+        gw, ga = [], []
+        if genre:
+            gid = self._genre_id(genre)
+            if gid is None:
+                raise SystemExit(f"没有这个体裁：{genre}"
+                                 "（可用：诗 / 词 / 曲 / 诗经 / 楚辞 / 论语 / 蒙学 / 四书五经 / 其他）")
+            gw.append("p.genre_id = ?")
+            ga.append(gid)
         if like or len(q) < 3:
-            return self._poems("p.content LIKE ? OR p.title LIKE ?",
-                               (f"%{q}%", f"%{q}%"), limit, order="p.id")
-        w = [f"p.id IN (SELECT rowid FROM poems_fts_{lang} WHERE poems_fts_{lang} MATCH ?)"]
-        a = [q]
+            w = ["(p.content LIKE ? OR p.title LIKE ?)"] + gw
+            return self._poems(" AND ".join(w),
+                               (f"%{q}%", f"%{q}%") + tuple(ga), limit, order="p.id")
+        w = [f"p.id IN (SELECT rowid FROM poems_fts_{lang} WHERE poems_fts_{lang} MATCH ?)"] + gw
+        a = [q] + ga
         if type_:
             w.append("t.name = ?")
             a.append(type_)
@@ -257,6 +340,13 @@ class Local:
     def dynasties(self):
         return self._rows(f"SELECT id,name,name_en,start_year,end_year FROM dynasties_{self.lang} ORDER BY id")
 
+    def genres(self):
+        """体裁轴（与朝代正交）。旧库没有这张表时返回空列表，不报错。"""
+        if not self._genre_cols()[0]:
+            return []
+        return self._rows(f"""SELECT id,name,name_en,description
+                              FROM genres_{self.lang} ORDER BY id""")
+
     def types(self):
         return self._rows(f"""SELECT id,name,category,lines,chars_per_line,description
                               FROM poetry_types_{self.lang} ORDER BY id""")
@@ -267,15 +357,18 @@ class Local:
             return []
         lang = self.lang
         ph = ",".join("?" * len(ids))
+        extra, joins = self._genre_select()
+        sel = ",\n               ".join(["p.id, p.title, p.content",
+              "a.name AS author_name, a.id AS author_id",
+              "d.name AS dynasty_name, d.id AS dynasty_id",
+              "t.name AS type_name, t.id AS type_id"] + extra)
         sql = f"""
-        SELECT p.id, p.title, p.content,
-               a.name AS author_name, a.id AS author_id,
-               d.name AS dynasty_name, d.id AS dynasty_id,
-               t.name AS type_name, t.id AS type_id
+        SELECT {sel}
         FROM poems_{lang} p
         LEFT JOIN authors_{lang} a ON a.id = p.author_id
         LEFT JOIN dynasties_{lang} d ON d.id = p.dynasty_id
         LEFT JOIN poetry_types_{lang} t ON t.id = p.type_id
+        {' '.join(joins)}
         WHERE p.id IN ({ph})"""
         got = {r["id"]: r for r in self._rows(sql, ids)}
         out = []
@@ -283,10 +376,7 @@ class Local:
             r = got.get(pid)
             if not r:
                 continue
-            p = {"id": r["id"], "title": r["title"], "content": json.loads(r["content"]),
-                 "author": {"id": r["author_id"], "name": r["author_name"]},
-                 "dynasty": {"id": r["dynasty_id"], "name": r["dynasty_name"]},
-                 "type": {"id": r["type_id"], "name": r["type_name"]}}
+            p = self._decorate(r)
             if meta and pid in meta:
                 p["score"] = meta[pid]
             out.append(p)
@@ -472,12 +562,17 @@ class Online:
         with opener.open(req, timeout=30) as r:
             return json.loads(r.read().decode("utf-8"))
 
-    def random(self, author=None, type_=None, dynasty=None, char=None, limit=1):
+    def random(self, author=None, type_=None, dynasty=None, char=None, limit=1, genre=None):
+        if genre:
+            raise SystemExit("在线通道不支持按体裁过滤 —— 体裁轴是本地库（v0.3.0）才有的，"
+                             "请去掉 --online 用本地库。")
         d = self._get("/api/poems/random", {"author": author, "type": type_,
                                             "dynasty": dynasty, "char": char})
         return [d["data"]] if d.get("data") else []
 
-    def search(self, q, limit=10, like=False, type_=None):
+    def search(self, q, limit=10, like=False, type_=None, genre=None):
+        if genre:
+            raise SystemExit("在线通道不支持按体裁过滤 —— 请去掉 --online 用本地库。")
         d = self._get("/api/search", {"q": q, "page": 1, "page_size": limit})
         return (d.get("data") or [])[:limit]
 
@@ -500,6 +595,10 @@ class Online:
 
     def types(self):
         return self._get("/api/types", {}).get("data") or []
+
+    def genres(self):
+        """在线版没有体裁轴（上游数据模型里朝代和体裁就是混在一起的）。"""
+        return []
 
     # 在线版没有倒排索引，只能用 /api/search 凑合（能力降级，仅应急）
     def image(self, words, limit=10, by="total", random_pick=False, max_lines=20):
@@ -555,12 +654,14 @@ def main():
 
     r = sub.add_parser("random", help="随机诗词")
     r.add_argument("--author"); r.add_argument("--type", dest="type_")
+    r.add_argument("--genre", help="体裁轴：诗/词/曲/诗经/楚辞/论语/蒙学/四书五经/其他（与朝代正交，可组合）")
     r.add_argument("--dynasty"); r.add_argument("--char")
     r.add_argument("--limit", type=int, default=1)
 
     s = sub.add_parser("search", help="搜索")
     s.add_argument("q"); s.add_argument("--like", action="store_true")
     s.add_argument("--type", dest="type_")
+    s.add_argument("--genre", help="体裁轴过滤（同上）")
     s.add_argument("--limit", type=int, default=5)
 
     g = sub.add_parser("poem", help="按 id 取诗"); g.add_argument("id", type=int)
@@ -568,7 +669,8 @@ def main():
     a.add_argument("--limit", type=int, default=5)
     sub.add_parser("stats", help="统计")
     sub.add_parser("dynasties", help="朝代列表")
-    sub.add_parser("types", help="体裁列表")
+    sub.add_parser("types", help="体裁形式列表（五言绝句/七言律诗…）")
+    sub.add_parser("genres", help="体裁轴列表（诗/词/曲…，与朝代正交）")
     sub.add_parser("keywords", help="列出内置意象/主题词表")
 
     im = sub.add_parser("image", help="按意象捞诗（可给多个）")
@@ -607,10 +709,12 @@ def main():
 
     if args.cmd == "random":
         for x in src.random(args.author, args.type_, args.dynasty, args.char,
-                            getattr(args, "limit", 1) or 1):
+                            getattr(args, "limit", 1) or 1,
+                            getattr(args, "genre", None)):
             print(fmt(x)); print()
     elif args.cmd == "search":
-        res = src.search(args.q, args.limit, getattr(args, "like", False), getattr(args, "type_", None))
+        res = src.search(args.q, args.limit, getattr(args, "like", False),
+                         getattr(args, "type_", None), getattr(args, "genre", None))
         print(f"共返回 {len(res)} 条\n")
         for x in res:
             print(fmt(x)); print()
@@ -644,6 +748,19 @@ def main():
     elif args.cmd == "types":
         for t in src.types():
             print(f"#{t['id']} {t['name']} · {t.get('category')} {t.get('description') or ''}")
+    elif args.cmd == "genres":
+        gs = src.genres()
+        if not gs:
+            print("（这个库没有体裁轴 —— 旧库只有 type_id。用百川 v0.3.0+ 的库才有。）")
+        else:
+            print("体裁轴（与朝代正交，可任意组合查询）：")
+            for g in gs:
+                print(f"#{g['id']} {g['name']:<6}{g.get('name_en') or '':<10}{g.get('description') or ''}")
+            print("\n用法示例：")
+            print("  random --genre 词              所有词，不分朝代")
+            print("  random --genre 诗 --dynasty 唐  唐诗")
+            print("  random --genre 诗 --dynasty 宋  宋诗")
+            print("  random --genre 词 --dynasty 清  清词")
     elif args.cmd == "keywords":
         print("意象（image 直接查）：")
         print("  " + "  ".join(IMAGERY))

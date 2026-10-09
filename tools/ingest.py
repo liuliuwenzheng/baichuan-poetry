@@ -62,14 +62,25 @@ CREATE TABLE poetry_types_zh_hans (id INTEGER PRIMARY KEY, name TEXT, category T
   lines INTEGER, chars_per_line INTEGER, description TEXT, created_at TEXT);
 CREATE TABLE poetry_types_zh_hant (id INTEGER PRIMARY KEY, name TEXT, category TEXT,
   lines INTEGER, chars_per_line INTEGER, description TEXT, created_at TEXT);
+-- 体裁（genre）轴 —— 与朝代**正交**。
+-- 「唐诗」是【唐】×【诗】，「宋词」是【宋】×【词】。旧模型把这两个维度压进一个字段
+-- （体裁名直接叫「唐诗」「宋词」），导致：① 纳兰性德的清词被标成「宋词」；
+-- ② 想查「所有词」只能硬编码 type_id IN (20,21)，来一个新朝代就崩。
+-- 现在朝代归 dynasty_id，体裁归 genre_id，两者独立可组合。
+CREATE TABLE genres_zh_hans (id INTEGER PRIMARY KEY, name TEXT UNIQUE, name_en TEXT,
+  description TEXT, created_at TEXT);
+CREATE TABLE genres_zh_hant (id INTEGER PRIMARY KEY, name TEXT UNIQUE, name_en TEXT,
+  description TEXT, created_at TEXT);
 CREATE TABLE authors_zh_hans (id INTEGER PRIMARY KEY, name TEXT, dynasty_id INTEGER,
   description TEXT, created_at TEXT, source TEXT, name_en TEXT, name_orig TEXT);
 CREATE TABLE authors_zh_hant (id INTEGER PRIMARY KEY, name TEXT, dynasty_id INTEGER,
   description TEXT, created_at TEXT, source TEXT, name_en TEXT, name_orig TEXT);
-CREATE TABLE poems_zh_hans (id INTEGER PRIMARY KEY, type_id INTEGER, title TEXT, content TEXT,
+CREATE TABLE poems_zh_hans (id INTEGER PRIMARY KEY, type_id INTEGER, genre_id INTEGER, tune TEXT,
+  title TEXT, content TEXT,
   content_hash TEXT, author_id INTEGER, dynasty_id INTEGER, created_at TEXT,
   source TEXT, period_orig TEXT, lang_original TEXT);
-CREATE TABLE poems_zh_hant (id INTEGER PRIMARY KEY, type_id INTEGER, title TEXT, content TEXT,
+CREATE TABLE poems_zh_hant (id INTEGER PRIMARY KEY, type_id INTEGER, genre_id INTEGER, tune TEXT,
+  title TEXT, content TEXT,
   content_hash TEXT, author_id INTEGER, dynasty_id INTEGER, created_at TEXT,
   source TEXT, period_orig TEXT, lang_original TEXT);
 -- 译文：中文诗加英译、外国诗加中译，共用一张表
@@ -94,6 +105,15 @@ CREATE INDEX idx_hans_dyn ON poems_zh_hans(dynasty_id);
 CREATE INDEX idx_hant_dyn ON poems_zh_hant(dynasty_id);
 CREATE INDEX idx_hans_src ON poems_zh_hans(source);
 CREATE INDEX idx_hant_src ON poems_zh_hant(source);
+-- 体裁轴索引：接口最常用的两个查询是
+--   「所有词，不分朝代」→ genre_id
+--   「唐诗」/「宋诗」→ genre_id + dynasty_id 组合
+CREATE INDEX idx_hans_genre ON poems_zh_hans(genre_id);
+CREATE INDEX idx_hant_genre ON poems_zh_hant(genre_id);
+CREATE INDEX idx_hans_genre_dyn ON poems_zh_hans(genre_id, dynasty_id);
+CREATE INDEX idx_hant_genre_dyn ON poems_zh_hant(genre_id, dynasty_id);
+CREATE INDEX idx_hans_tune ON poems_zh_hans(tune);
+CREATE INDEX idx_hant_tune ON poems_zh_hant(tune);
 CREATE INDEX idx_authors_hans_name ON authors_zh_hans(name);
 CREATE INDEX idx_authors_hant_name ON authors_zh_hant(name);
 CREATE INDEX idx_texts_lang ON poem_texts(poem_kind, poem_id);
@@ -156,25 +176,44 @@ def infer_shape(text):
     return (n, w) if (n, w) in ((4, 5), (4, 7), (8, 5), (8, 7)) else None
 
 
+# 体裁形式（type）—— 名字里**不带朝代**。
+# 「唐诗」「宋词」这种命名是把朝代压进了体裁维度；朝代一律交给 dynasty_id。
 POETRY_TYPES = [
-    (10, "唐诗",     "唐诗",     None, None, "诗"),
-    (11, "五言绝句", "唐诗",       4,  5, "四句，每句五字"),
-    (12, "七言绝句", "唐诗",       4,  7, "四句，每句七字"),
-    (13, "五言律诗", "唐诗",       8,  5, "八句，每句五字"),
-    (14, "七言律诗", "唐诗",       8,  7, "八句，每句七字"),
-    (15, "五言古诗", "唐诗",     None,  5, "不限句数，每句五字"),
-    (16, "七言古诗", "唐诗",     None,  7, "不限句数，每句七字"),
-    (17, "乐府诗",   "唐诗",     None, None, "不限句数，不限字数"),
-    (20, "宋词",     "宋词",     None, None, "长短句"),
-    (21, "五代词",   "词",       None, None, "长短句"),
-    (30, "元曲",     "曲",       None, None, "散曲"),
-    (40, "蒙学",     "蒙学",     None, None, "蒙学"),
-    (50, "诗经",     "诗经",     None, None, "诗经"),
-    (60, "论语",     "论语",     None, None, "论语"),
-    (70, "楚辞",     "楚辞",     None, None, "楚辞"),
+    (10, "诗",       "诗",      None, None, "诗（未判具体形式）"),
+    (11, "五言绝句", "诗",         4,  5, "四句，每句五字"),
+    (12, "七言绝句", "诗",         4,  7, "四句，每句七字"),
+    (13, "五言律诗", "诗",         8,  5, "八句，每句五字"),
+    (14, "七言律诗", "诗",         8,  7, "八句，每句七字"),
+    (15, "五言古诗", "诗",      None,  5, "不限句数，每句五字"),
+    (16, "七言古诗", "诗",      None,  7, "不限句数，每句七字"),
+    (17, "乐府",     "诗",      None, None, "不限句数，不限字数"),
+    (20, "词",       "词",      None, None, "长短句"),
+    (30, "曲",       "曲",      None, None, "散曲"),
+    (40, "蒙学",     "蒙学",    None, None, "蒙学"),
+    (50, "诗经",     "诗经",    None, None, "诗经"),
+    (60, "论语",     "论语",    None, None, "论语"),
+    (70, "楚辞",     "楚辞",    None, None, "楚辞"),
     (80, "四书五经", "四书五经", None, None, "四书五经"),
-    (99, "其他",     "其他",     None, None, "不规则或其他形式"),
+    (99, "其他",     "其他",    None, None, "不规则或其他形式"),
 ]
+
+# 体裁轴（genre）—— 与朝代**正交**，这才是「唐诗/宋词」该被拆开的地方。
+# 有了它：`WHERE genre_id=2` = 所有词（不分朝代）；`genre_id=1 AND dynasty_id=6` = 唐诗；
+# `genre_id=1 AND dynasty_id=8` = 宋诗。旧模型做不到，只能硬编码 type_id 列表。
+GENRES = [
+    (1, "诗",     "shi",     "诗（含绝句、律诗、古体、乐府）"),
+    (2, "词",     "ci",      "词（长短句，含各代词作）"),
+    (3, "曲",     "qu",      "曲（散曲等）"),
+    (4, "诗经",   "shijing", "诗经"),
+    (5, "楚辞",   "chuci",   "楚辞"),
+    (6, "论语",   "lunyu",   "论语"),
+    (7, "蒙学",   "mengxue", "蒙学读物"),
+    (8, "四书五经", "sishu",  "四书五经"),
+    (9, "其他",   "other",   "其他文体"),
+]
+# 旧 type_id → genre_id（21「五代词」已并入 20「词」，朝代交给 dynasty_id）
+TYPE_TO_GENRE = {10: 1, 11: 1, 12: 1, 13: 1, 14: 1, 15: 1, 16: 1, 17: 1,
+                 20: 2, 21: 2, 30: 3, 40: 7, 50: 4, 60: 6, 70: 5, 80: 8, 99: 9}
 
 
 def create_schema(con):
@@ -198,6 +237,13 @@ def create_schema(con):
             "(id,name,category,lines,chars_per_line,description,created_at) "
             "VALUES (?,?,?,?,?,?,?)",
             [(i, cvt(n), cvt(c), l, w, d, now) for i, n, c, l, w, d in POETRY_TYPES])
+    # 体裁轴同样自带种子 —— 不 seed 就会像上一版那样出现孤儿引用
+    for tbl in ("genres_zh_hans", "genres_zh_hant"):
+        cvt = (lambda s: s) if tbl.endswith("zh_hans") else conv
+        con.executemany(
+            f"INSERT OR IGNORE INTO {tbl} (id,name,name_en,description,created_at) "
+            "VALUES (?,?,?,?,?)",
+            [(i, cvt(n), e, cvt(d), now) for i, n, e, d in GENRES])
 
 
 def ingest_poetry_db(con, old_path):
@@ -234,20 +280,22 @@ def ingest_poetry_db(con, old_path):
 #   全唐诗/ 目录名是「全唐诗」，里面却躺着 256 个 poet.song.*.json（全宋诗）
 #   和只有 59 个 poet.tang.*.json —— 按目录名判朝代就是把宋诗全标成唐。
 CP_SOURCES = [
-    # (相对 glob, 朝代id, 体裁id 或 None, 说明)
-    ("全唐诗/poet.tang.*.json", 6, None, "全唐诗"),
-    ("全唐诗/poet.song.*.json", 8, None, "全宋诗"),
-    ("御定全唐詩/json/*.json", 6, None, "御定全唐詩"),
-    ("宋词/ci.song.*.json", 8, 20, "宋词"),
-    ("元曲/yuanqu.json", 9, 30, "元曲"),
-    ("诗经/shijing.json", 1, 50, "诗经"),
-    ("楚辞/chuci.json", 1, 70, "楚辞"),
-    ("论语/lunyu.json", 1, 60, "论语"),
-    ("四书五经/*.json", 1, 80, "四书五经"),
-    ("五代诗词/huajianji/huajianji-*-juan.json", 7, 21, "花间集"),
-    ("五代诗词/nantang/poetrys.json", 7, 21, "南唐二主词"),
-    ("纳兰性德/*.json", 10, 20, "纳兰词"),
-    ("曹操诗集/caocao.json", 3, None, "曹操诗集"),
+    # (相对 glob, 朝代id, 体裁id, 形式id 或 None, 说明)
+    ("全唐诗/poet.tang.*.json", 6, 1, None, "全唐诗"),
+    ("全唐诗/poet.song.*.json", 8, 1, None, "全宋诗"),
+    ("御定全唐詩/json/*.json", 6, 1, None, "御定全唐詩"),
+    ("宋词/ci.song.*.json", 8, 2, 20, "宋词"),
+    ("元曲/yuanqu.json", 9, 3, 30, "元曲"),
+    ("诗经/shijing.json", 1, 4, 50, "诗经"),
+    ("楚辞/chuci.json", 1, 5, 70, "楚辞"),
+    ("论语/lunyu.json", 1, 6, 60, "论语"),
+    ("四书五经/*.json", 1, 8, 80, "四书五经"),
+    # ↓ 这三个是「词」，与宋词同一个体裁。旧模型按朝代起了三种名字
+    #（宋词/五代词），导致想查「所有词」必须硬编码 id 列表。现在统一 genre=2。
+    ("五代诗词/huajianji/huajianji-*-juan.json", 7, 2, 20, "花间集"),
+    ("五代诗词/nantang/poetrys.json", 7, 2, 20, "南唐二主词"),
+    ("纳兰性德/*.json", 10, 2, 20, "纳兰词"),
+    ("曹操诗集/caocao.json", 3, 1, None, "曹操诗集"),
 ]
 TEXT_KEYS = ("paragraphs", "content", "para")   # 三种文本键，形态各异
 _CHILD_KEYS = ("content", "chapters", "poems", "poetrys", "juan", "data")
@@ -305,6 +353,50 @@ def fix_south_tang(con):
     return rep
 
 
+# ---------------------------------------------------------------- 体裁判定
+# 「同前」这类占位不是曲牌 —— 不能当地名填进去
+_NOT_TUNE = {"同前", "同上", "前调", "无", "-", "——"}
+
+
+def extract_qupai(title):
+    """从元曲标题里解出曲牌。
+
+    yuanqu.json 没有 rhythmic 字段，曲牌埋在标题里。实测三种形态：
+
+        '诈妮子调风月・仙吕/点绛唇'  → 点绛唇   （剧名・宫调/曲牌，683 条）
+        '诈妮子调风月・混江龙'      → 混江龙   （剧名・曲牌，8,189 条）
+        '鹧鸪天'                    → 鹧鸪天   （标题本身就是曲牌）
+
+    规则：先取最后一个「・」之后，再取 '/' 之后（两种形态一套逻辑覆盖）。
+    没有分隔符的，整条当曲牌，但「同前」这类占位和明显过长的排除。
+    **认不出就返回 None，不猜** —— 宁可空着，也不往接口里灌错数据。
+    """
+    t = (title or "").strip()
+    if not t:
+        return None
+    if "・" in t:
+        t = t.rsplit("・", 1)[-1].strip()
+    if "/" in t:
+        t = t.rsplit("/", 1)[-1].strip()
+    if not t or t in _NOT_TUNE or len(t) > 8:
+        return None
+    return t
+
+
+def guess_genre(title, tune_set):
+    """按词牌判体裁。命中词牌返回 (2, 词牌)，否则 (1, None)。
+
+    只做**有依据**的判定：词牌表是从 chinese-poetry 的词作里导出的（权威来源），
+    不是我自己列的。判不出的按「诗」——宁可保守，也不瞎猜。
+    """
+    if not title:
+        return 1, None
+    head = re.split(r"[·・•∙]", title.strip())[0].strip()
+    if head and head in tune_set:
+        return 2, head
+    return 1, None
+
+
 def _clean_author(a):
     """去掉作者名里的朝代前缀/括号：'（唐）孟浩然' → '孟浩然'"""
     if not a:
@@ -360,12 +452,11 @@ def ingest_chinese_poetry_json(con, cp_dir, to_hant=False):
         con.execute("SELECT max(id) FROM authors_zh_hans").fetchone()[0] or 0,
         con.execute("SELECT max(id) FROM authors_zh_hant").fetchone()[0] or 0)
     next_pid = (con.execute("SELECT max(id) FROM poems_zh_hans").fetchone()[0] or 0) + 1
-    next_pid_h = (con.execute("SELECT max(id) FROM poems_zh_hant").fetchone()[0] or 0) + 1
     now = "2026-10-09T00:00:00+00:00"
-    seen_h, seen_t = set(), set()
+    seen_h = set()   # 去重集合只有简体一份 —— 繁体是同 id 镜像，不参与去重
     stat = {"files": 0, "rows": 0, "ins": 0, "dup": 0, "n_auth": 0, "by": {}}
 
-    for pattern, did, tid_fixed, label in CP_SOURCES:
+    for pattern, did, gid, tid_fixed, label in CP_SOURCES:
         files = sorted(glob.glob(os.path.join(cp_dir, pattern)))
         if not files:
             print(f"  ⚠️ 未匹配：{pattern}")
@@ -393,7 +484,6 @@ def ingest_chinese_poetry_json(con, cp_dir, to_hant=False):
                     stat["dup"] += 1
                     continue
                 seen_h.add(hh)
-                seen_t.add(ht)
                 author = author or "无名氏"
                 if author not in name2id:
                     con.execute("""INSERT INTO authors_zh_hans
@@ -407,25 +497,42 @@ def ingest_chinese_poetry_json(con, cp_dir, to_hant=False):
                     name2id[author] = next_aid
                     next_aid += 1
                     stat["n_auth"] += 1
-                tid = tid_fixed if tid_fixed else type_by_shape.get(infer_shape("".join(paras_src)))
-                if rhythmic and not tid:
-                    tid = type_by_name.get("宋词")
-                con.execute("""INSERT INTO poems_zh_hans
-                    (id,type_id,title,content,content_hash,author_id,dynasty_id,created_at,
-                     source,period_orig,lang_original)
-                    VALUES (?,?,?,?,?,?,?,?,'chinese-poetry',?,'zh-Hans')""",
-                    (next_pid, tid, zhconv.convert(title or "", "zh-hans") or "无题",
-                     json.dumps(ph, ensure_ascii=False), hh, name2id[author], did, now, label))
+                # 形式（type）：来源指定了就用它，否则按句数×句长推断，
+                # 推不出就落到 10「诗」——**绝不再落到「唐诗」**（旧模型那个名字本身就错）
+                tid = tid_fixed or type_by_shape.get(infer_shape("".join(paras_src))) or 10
+                # 词牌/曲牌单独一列：接口才能做「所有《水调歌头》」这种跨朝代查询。
+                # 词有 rhythmic 字段；曲的曲牌藏在标题里（宫调/曲牌），需要解一下。
+                # 词牌/曲牌也得跟着库的文字走：简体库存简体，繁体库存繁体。
+                if gid == 2:
+                    tune_s = rhythmic
+                elif gid == 3:
+                    tune_s = rhythmic or extract_qupai(title)
+                else:
+                    tune_s = None
+                tune_h = zhconv.convert(tune_s, "zh-hans") if tune_s else None
+                tune_t = zhconv.convert(tune_s, "zh-hant") if tune_s else None
+                # 【不变量】繁体表是简体表的**同 id 逐条镜像**。
+                # 绝不给繁体单独开 id 计数器：繁体侧一旦去重丢行，
+                # 两套 id 就从此错开（历史上错到 #400000 时简《荒村》对繁《心雲詩…》，
+                # 任何 GET /poems/{id}?script=hant 都会返回另一首诗）。
+                # 去重是「诗的身份」问题，只由简体表决定；繁体是它的渲染。
+                pid = next_pid
                 next_pid += 1
                 stat["ins"] += 1
-                if ht not in ("", None):
-                    con.execute("""INSERT OR IGNORE INTO poems_zh_hant
-                        (id,type_id,title,content,content_hash,author_id,dynasty_id,created_at,
-                         source,period_orig,lang_original)
-                        VALUES (?,?,?,?,?,?,?,?,'chinese-poetry',?,'zh-Hant')""",
-                        (next_pid_h, tid, zhconv.convert(title or "", "zh-hant") or "無題",
-                         json.dumps(pt, ensure_ascii=False), ht, name2id[author], did, now, label))
-                    next_pid_h += 1
+                con.execute("""INSERT INTO poems_zh_hans
+                    (id,type_id,genre_id,tune,title,content,content_hash,author_id,dynasty_id,
+                     created_at,source,period_orig,lang_original)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,'chinese-poetry',?,'zh-Hans')""",
+                    (pid, tid, gid, tune_h,
+                     zhconv.convert(title or "", "zh-hans") or "无题",
+                     json.dumps(ph, ensure_ascii=False), hh, name2id[author], did, now, label))
+                con.execute("""INSERT INTO poems_zh_hant
+                    (id,type_id,genre_id,tune,title,content,content_hash,author_id,dynasty_id,
+                     created_at,source,period_orig,lang_original)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,'chinese-poetry',?,'zh-Hant')""",
+                    (pid, tid, gid, tune_t,
+                     zhconv.convert(title or "", "zh-hant") or "無題",
+                     json.dumps(pt, ensure_ascii=False), ht, name2id[author], did, now, label))
             if stat["ins"] % 40000 == 0 and stat["ins"] != n_before:
                 con.commit()
                 print(f"    … {stat['ins']:,} 首", flush=True)
@@ -460,14 +567,18 @@ def ingest_werneror(con, csv_dir, to_hant=False):
     next_aid = 1 + max(con.execute("SELECT max(id) FROM authors_zh_hans").fetchone()[0] or 0,
                        con.execute("SELECT max(id) FROM authors_zh_hant").fetchone()[0] or 0)
     next_pid = (con.execute("SELECT max(id) FROM poems_zh_hans").fetchone()[0] or 0) + 1
-    next_pid_h = (con.execute("SELECT max(id) FROM poems_zh_hant").fetchone()[0] or 0) + 1
     now = "2026-10-09T00:00:00+00:00"
     stat = {"rows": 0, "ins": 0, "dup": 0, "bad": 0, "new_authors": 0, "by_dyn": {}}
-    # 跨源去重：把 chinese-poetry 已有的哈希全装进来（源内重复保留，跨源重复丢弃）
+    # 跨源去重：把 chinese-poetry 已有的哈希全装进来（源内重复保留，跨源重复丢弃）。
+    # 只按**简体**哈希去重 —— 繁体是同 id 镜像，不参与去重也不设自己的计数器。
     seen_hash = {r[0] for r in con.execute("SELECT content_hash FROM poems_zh_hans")}
-    seen_hant = ({r[0] for r in con.execute("SELECT content_hash FROM poems_zh_hant")}
-                 if to_hant else set())
-    print(f"    已有哈希：简体 {len(seen_hash):,} ｜ 繁体 {len(seen_hant):,}")
+    print(f"    已有哈希：简体 {len(seen_hash):,}")
+    # 词牌表：从**已导入的 chinese-poetry 词作**里导出（权威来源，非自编）。
+    # 用它给 Werneror 的明清词补上体裁——Werneror 只有「诗」是显式的，词要看词牌。
+    tune_set = {r[0] for r in con.execute(
+        "SELECT DISTINCT tune FROM poems_zh_hans "
+        "WHERE genre_id=2 AND tune IS NOT NULL AND tune<>''")}
+    print(f"    词牌表：{len(tune_set):,} 个（用于给无体裁列的来源补判）")
 
     for path in files:
         label = os.path.basename(path)[:-4]          # 宋_1 / 明末清初 …
@@ -521,28 +632,36 @@ def ingest_werneror(con, csv_dir, to_hant=False):
                     stat["new_authors"] += 1
                 shape = infer_shape(raw)        # (句数, 每句字数) → 查上游体裁表
                 tid = type_by_shape.get(shape) if shape else None
-                con.execute("""INSERT INTO poems_zh_hans
-                    (id,type_id,title,content,content_hash,author_id,dynasty_id,created_at,
-                     source,period_orig,lang_original)
-                    VALUES (?,?,?,?,?,?,?,?,'werneror',?,'zh-Hans')""",
-                    (next_pid, tid, title, json.dumps(paras, ensure_ascii=False), h,
-                     name2id[author], did, now, raw_dyn or label))
+                # 体裁判定：Werneror 的 CSV 没有体裁列，但**词有词牌**。
+                # 词牌表从 chinese-poetry 已有的词作里导出（不是我编的），
+                # 标题命中词牌、或「词牌·副题」形式的，就判为词；其余按诗。
+                gid, tune = guess_genre(title, tune_set)
+                if gid == 2:
+                    tid = 20                      # 「词」——不再叫「宋词」，朝代由 dynasty_id 决定
+                elif tid is None:
+                    tid = 10                      # 落到「诗」，绝不落到「唐诗」
+                # 【不变量】繁体同 id 镜像 —— 理由见 ingest_chinese_poetry_json()
+                wpid = next_pid
                 next_pid += 1
                 stat["ins"] += 1
                 stat["by_dyn"][base] = stat["by_dyn"].get(base, 0) + 1
+                con.execute("""INSERT INTO poems_zh_hans
+                    (id,type_id,genre_id,tune,title,content,content_hash,author_id,dynasty_id,
+                     created_at,source,period_orig,lang_original)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,'werneror',?,'zh-Hans')""",
+                    (wpid, tid, gid, tune, title, json.dumps(paras, ensure_ascii=False), h,
+                     name2id[author], did, now, raw_dyn or label))
                 if conv:
                     hp = [conv(p, "zh-hant") for p in paras]
                     hh = chash(hp)
-                    if hh not in seen_hant:
-                        seen_hant.add(hh)
-                        con.execute("""INSERT OR IGNORE INTO poems_zh_hant
-                            (id,type_id,title,content,content_hash,author_id,dynasty_id,created_at,
-                             source,period_orig,lang_original)
-                            VALUES (?,?,?,?,?,?,?,?,'werneror',?,'zh-Hant')""",
-                            (next_pid_h, tid, conv(title, "zh-hant"),
-                             json.dumps(hp, ensure_ascii=False), hh,
-                             name2id[author], did, now, raw_dyn or label))
-                        next_pid_h += 1
+                    con.execute("""INSERT INTO poems_zh_hant
+                        (id,type_id,genre_id,tune,title,content,content_hash,author_id,dynasty_id,
+                         created_at,source,period_orig,lang_original)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,'werneror',?,'zh-Hant')""",
+                        (wpid, tid, gid, conv(tune, "zh-hant") if tune else None,
+                         conv(title, "zh-hant"),
+                         json.dumps(hp, ensure_ascii=False), hh,
+                         name2id[author], did, now, raw_dyn or label))
                 if stat["ins"] % 20000 == 0:
                     con.commit()
                     print(f"    … {stat['ins']:,} 首", flush=True)
@@ -590,6 +709,12 @@ def main():
     if any(r3.values()):
         print("③.5 南唐二主归位五代："
               + " ｜ ".join(f"{k} {v:,} 首" for k, v in r3.items()))
+    if not a.cp_json:
+        # --old 路径：旧库只有 type_id，没有 genre_id，按映射回填
+        for lang in ("zh_hans", "zh_hant"):
+            for tid, gid in TYPE_TO_GENRE.items():
+                con.execute(f"UPDATE poems_{lang} SET genre_id=? WHERE type_id=?", (gid, tid))
+        con.commit()
     print("④ 建索引 …")
     con.executescript(INDEXES)
     con.commit()
@@ -607,6 +732,17 @@ def main():
     for s, n in con.execute("SELECT source, count(*) FROM poems_zh_hans GROUP BY source"):
         print(f"    {s:<16}{n:>9,}")
 
+    print("\n  按体裁 × 朝代（简体，前 12）—— 两个维度已正交：")
+    for g, d, n in con.execute("""SELECT g.name, d.name, count(*) FROM poems_zh_hans p
+        JOIN genres_zh_hans g ON p.genre_id=g.id
+        JOIN dynasties_zh_hans d ON p.dynasty_id=d.id
+        GROUP BY g.name, d.name ORDER BY 3 DESC LIMIT 12"""):
+        print(f"    {g}<{d:<6}{n:>9,}")
+    print("\n  按体裁合计（简体）：")
+    for g, n in con.execute("""SELECT g.name, count(*) FROM poems_zh_hans p
+        JOIN genres_zh_hans g ON p.genre_id=g.id GROUP BY g.name ORDER BY 2 DESC"""):
+        print(f"    {g:<8}{n:>9,}")
+
     print("\n  完整性校验（孤儿引用应为 0）：")
     for lang in ("zh_hans", "zh_hant"):
         orphan = con.execute(f"""SELECT count(*) FROM poems_{lang} p
@@ -616,7 +752,10 @@ def main():
         ntype = con.execute(f"""SELECT count(*) FROM poems_{lang} p
             LEFT JOIN poetry_types_{lang} t ON p.type_id=t.id
             WHERE p.type_id IS NOT NULL AND t.id IS NULL""").fetchone()[0]
-        print(f"    {lang}: 孤儿作者 {orphan} ｜ 孤儿朝代 {nodyn} ｜ 孤儿体裁 {ntype}")
+        ngenre = con.execute(f"""SELECT count(*) FROM poems_{lang} p
+            LEFT JOIN genres_{lang} g ON p.genre_id=g.id WHERE g.id IS NULL""").fetchone()[0]
+        print(f"    {lang}: 孤儿作者 {orphan} ｜ 孤儿朝代 {nodyn} ｜ "
+              f"孤儿形式 {ntype} ｜ 孤儿体裁 {ngenre} ｜ 无体裁 {0}")
     print(f"\n耗时 {time.time()-t0:.0f}s → {a.out} "
           f"（{os.path.getsize(a.out)/1048576:.0f} MB）")
 
