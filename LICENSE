@@ -24,10 +24,20 @@ SOFTWARE.
 
 关于数据（Data notice）
 
-本仓库的代码以 MIT 授权。诗歌文本数据来自第三方开源数据集，随其原始授权：
+本仓库的**代码**（`tools/`、`query/`、文档）以 MIT 授权，版权归本仓库贡献者。
 
-- chinese-poetry / palemoky fork — MIT
-- Werneror/Poetry — MIT
+诗歌**文本**来自第三方开源数据集，其著作权与许可归各来源所有：
 
-本项目对原始数据只做归一化、校验、索引与接口封装，不主张原始文本的著作权。
+| 来源 | 授权 | 版权 |
+|---|---|---|
+| chinese-poetry | MIT | © 2016 JackeyGao |
+| Werneror/Poetry | MIT | © 2018 Werner |
+| palemoky/chinese-poetry-api（`poetry.db` 数据包来源） | GPL-3.0 ⚠️ | 未使用其代码 |
+
+本项目对原始数据只做归一化、校验、去重、索引与接口封装，
+**不主张原始文本的著作权**；我们原创的是 schema 设计、数据修正与工具链。
+
+完整的版权声明、许可全文与引用方式，见 **NOTICE.md**（MIT 要求再分发时
+保留版权声明与许可声明，故该文件为必读）。
+
 若某数据源的权利人认为使用不当，请提 issue，我们会移除或调整。

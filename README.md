@@ -10,6 +10,23 @@
 
 ---
 
+## ⚠️ 先读这个：来源与授权
+
+**本项目是「汇集 / 衍生」作品，不是原创数据集。** 诗歌文本全部来自第三方开源项目，
+我们只做归一化、校验、去重、索引与查询接口：
+
+| 来源 | 授权 | 版权 |
+|---|---|---|
+| [chinese-poetry](https://github.com/chinese-poetry/chinese-poetry) | MIT | © 2016 JackeyGao |
+| [Werneror/Poetry](https://github.com/Werneror/Poetry) | MIT | © 2018 Werner |
+| [palemoky/chinese-poetry-api](https://github.com/palemoky/chinese-poetry-api)（`poetry.db` 数据包来源） | **GPL-3.0** ⚠️ | 见下方说明 |
+
+- **未使用任何第三方代码**；本仓库的 `tools/` 与 `query/` 均为原创实现。
+- v0.1.0 的唐宋部分导入自 `poetry.db`（GPL-3.0 项目的 dist 产物）。GPL 对「程序输出」
+  的适用性有争议，**为消除歧义，v0.2.0 将直接从 MIT 原始数据（chinese-poetry 的 JSON）
+  重建，完全绕开该产物**。
+- 完整版权声明、许可全文、引用方式 → **[NOTICE.md](NOTICE.md)**
+
 ## 这是什么
 
 网上诗歌数据集不少，但普遍存在三个问题：
@@ -151,6 +168,12 @@ python query/poem.py --db data/baichuan.db search "菊花" --limit 5
 
 ## 致谢
 
-- [chinese-poetry](https://github.com/chinese-poetry/chinese-poetry) 与其 [palemoky fork](https://github.com/palemoky/chinese-poetry)（fix-typo 分支）
-- [Werneror/Poetry](https://github.com/Werneror/Poetry)
-- [palemoky/chinese-poetry-api](https://github.com/palemoky/chinese-poetry-api)（诗泉，本项目的唐宋源数据库由它发布）
+本项目完全建立在他人成果之上，在此明确致谢：
+
+- [chinese-poetry](https://github.com/chinese-poetry/chinese-poetry) — **MIT, © 2016 JackeyGao**
+  （及其 [palemoky fork](https://github.com/palemoky/chinese-poetry) fix-typo 分支）
+- [Werneror/Poetry](https://github.com/Werneror/Poetry) — **MIT, © 2018 Werner**
+- [palemoky/chinese-poetry-api](https://github.com/palemoky/chinese-poetry-api)（诗泉）— GPL-3.0
+  项目的 `poetry.db` 数据包，是 v0.1.0 唐宋部分的来源
+
+**版权声明、许可全文与正确引用方式见 [NOTICE.md](NOTICE.md)。**
