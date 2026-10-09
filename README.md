@@ -155,14 +155,22 @@ python tools/fix_data.py --apply
 python tools/ingest.py --old <poetry.db> --werneror <Werneror目录> \
                        --out data/baichuan.db --to-hant
 
-# 4. 别名库（陶渊明 ↔ 陶潜）
+# 4. 别名库（陶渊明 ↔ 陶潜，240 条）
 python tools/build_aliases.py
 
-# 5. 直接查（沿用既有 CLI，无需改代码）
+# 5. 全文检索索引（FTS5 trigram）——可选，但强烈建议
+#    约 15 分钟，库会从 1.1 GB 涨到约 3.3 GB。不建也能查，只是走子串扫描。
+python tools/build_search.py
+
+# 6. 直接查（沿用既有 CLI，无需改代码）
 python query/poem.py --db data/baichuan.db random --author 陶潜
 python query/poem.py --db data/baichuan.db random --dynasty 明
-python query/poem.py --db data/baichuan.db search "菊花" --limit 5
+python query/poem.py --db data/baichuan.db search "明月几时有" --limit 5
 ```
+
+> **检索词至少 3 个字** —— FTS5 的 trigram 分词把连续 3 个字作为一个索引单元，
+> 少于 3 个字匹配不到任何 token。要查单字/双字（如飞花令的「月」），直接用
+> `?q=` 的 `LIKE` 子串路径即可（开放接口会自动替你换路，不会给你一个假的「0 结果」）。
 
 ## 路线图
 
@@ -172,7 +180,8 @@ python query/poem.py --db data/baichuan.db search "菊花" --limit 5
 - [x] 多源归一化 schema（`source` / `lang_original` / 译文表 / 世界诗表）
 - [x] 简繁双库同步（繁体库同 100.8 万首）
 - [x] 别名库（正式名 ↔ 习惯名）
-- [ ] 开放 REST / GraphQL 接口
+- [x] 全文检索索引（FTS5 trigram，跨简繁两库）
+- [x] 开放 REST / GraphQL 接口 → 在 **[诗文树 poetry-tree](https://github.com/liuliuwenzheng/poetry-tree)**（百川是它的数据源适配器）
 - [ ] 意象/名句倒排索引迁到新库
 - [ ] 世界诗歌：英、日、波斯等，原文 + 中文 + 英文三语对照
 

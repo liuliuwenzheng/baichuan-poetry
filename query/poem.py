@@ -176,6 +176,16 @@ class Local:
                 self.db.execute("ATTACH DATABASE ? AS kw", (kw,))
             except sqlite3.Error:
                 self.has_kw = False
+        # 全文索引（可选；没有就退化成 LIKE 子串扫描）。
+        # 全文索引是**可选产物**：`build_search.py` 建的，约 15 分钟、库大 2 GB。
+        # 缺了必须降级不能崩 —— v0.3.0 就踩过：库是全的但没建索引，
+        # `search` 直接报 `no such table: poems_fts_zh_hans`。
+        self.has_fts = bool(self._rows(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (f"poems_fts_{self.lang}",)))
+        # 别名表（可选；没有就只按本名匹配）
+        self.has_alias = bool(self._rows(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='author_aliases'"))
 
     def _rows(self, sql, args=()):
         return [dict(r) for r in self.db.execute(sql, args)]
@@ -270,8 +280,11 @@ class Local:
             w.append("p.content LIKE ?")
             a.append(f"%{char}%")
         if author:
-            w.append("a.name = ?")
-            a.append(author)
+            aids = self._author_ids(author)
+            if not aids:
+                raise self._no_author(author)
+            w.append(f"p.author_id IN ({','.join('?' * len(aids))})")
+            a += aids
         if dynasty:
             w.append("d.name = ?")
             a.append(dynasty)
@@ -300,7 +313,15 @@ class Local:
                                  "（可用：诗 / 词 / 曲 / 诗经 / 楚辞 / 论语 / 蒙学 / 四书五经 / 其他）")
             gw.append("p.genre_id = ?")
             ga.append(gid)
-        if like or len(q) < 3:
+        if like or len(q) < 3 or not self.has_fts:
+            # 三条都走 LIKE：① 用户明确 --like ② 词太短（trigram 按 3 字切分，
+            # 少于 3 字 MATCH 一定为空）③ 这个库压根没建索引。
+            # 后两条都要**降级而不是报错**，并且说清为什么降级 ——
+            # 悄悄给一个「0 结果」或一个 traceback，都是在骗人。
+            if not like and len(q) >= 3 and not self.has_fts:
+                sys.stderr.write(
+                    "提示：这个库没建全文索引，已改用 LIKE 子串扫描（结果完整，稍慢）。\n"
+                    "      建索引：python tools/build_search.py（约 15 分钟，库会大 2 GB）\n")
             w = ["(p.content LIKE ? OR p.title LIKE ?)"] + gw
             return self._poems(" AND ".join(w),
                                (f"%{q}%", f"%{q}%") + tuple(ga), limit, order="p.id")
@@ -316,13 +337,17 @@ class Local:
 
     def author(self, name, limit=10):
         lang = self.lang
+        aids = self._author_ids(name)          # 别名也算数
+        if not aids:
+            return {"authors": [], "poems": []}
+        ph = ",".join("?" * len(aids))
         rows = self._rows(f"""SELECT a.id, a.name, a.description,
                                d.name AS dynasty,
                                (SELECT count(*) FROM poems_{lang} p WHERE p.author_id = a.id) AS poem_count
                                FROM authors_{lang} a
                                LEFT JOIN dynasties_{lang} d ON d.id=a.dynasty_id
-                               WHERE a.name = ? ORDER BY poem_count DESC""", (name,))
-        poems = self._poems("a.name = ?", (name,), limit, order="RANDOM()")
+                               WHERE a.id IN ({ph}) ORDER BY poem_count DESC""", tuple(aids))
+        poems = self._poems(f"p.author_id IN ({ph})", tuple(aids), limit, order="RANDOM()")
         return {"authors": rows, "poems": poems}
 
     def stats(self):
@@ -460,8 +485,28 @@ class Local:
 
     # ---------------------------------------------------- 作者意象画像
     def _author_ids(self, name):
-        return [r["id"] for r in self._rows(
+        """作者名 → id 列表。**别名也算数**（陶渊明 → 陶潜）。
+
+        v0.3.0 建了 `author_aliases` 表，但 CLI 一直只按本名精确匹配 —— 于是
+        `random --author 陶渊明` 静默返回空字符串。用户看到的是「没有输出」，
+        得出的结论是「库里没有陶渊明」，而其实有 151 首。
+        **「搜不到」和「不存在」是两件事。**
+        """
+        ids = [r["id"] for r in self._rows(
             f"SELECT id FROM authors_{self.lang} WHERE name = ?", (name,))]
+        if self.has_alias:
+            ids += [r["author_id"] for r in self._rows(
+                "SELECT author_id FROM author_aliases WHERE alias = ? AND lang = ?",
+                (name, self.lang))]
+        return sorted(set(ids))
+
+    @staticmethod
+    def _no_author(name):
+        return SystemExit(
+            f"没有这个作者：{name}\n"
+            f"  提示：库里有别名表，本名/字/号/别称都能查到（陶渊明 → 陶潜、\n"
+            f"        李后主 → 李煜、苏东坡 → 苏轼、唐伯虎 → 唐寅、郑板桥 → 郑燮）。\n"
+            f"        若确认写法无误，可用 `author` 子命令看看库里是怎么写的。")
 
     def _baseline(self, ws):
         """全库基线：每个词在全库多少首诗里出现（优先用物化表）"""
@@ -723,6 +768,13 @@ def main():
             print(fmt(x))
     elif args.cmd == "author":
         d = src.author(args.name, args.limit)
+        if not d["authors"]:
+            # 别静默退出 —— 空输出会被读成「库里没有这个人」
+            sys.stderr.write(
+                f"没有这个作者：{args.name}\n"
+                f"  提示：本名/字/号/别称都能查到（陶渊明 → 陶潜、李后主 → 李煜、\n"
+                f"        苏东坡 → 苏轼、唐伯虎 → 唐寅、郑板桥 → 郑燮）。\n")
+            sys.exit(1)
         for au in d["authors"]:
             print(f"#{au['id']} {au['name']} · {au.get('dynasty') or ''} · 作品 {au.get('poem_count') or '?'} 首")
             if au.get("description"):
