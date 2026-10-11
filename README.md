@@ -4,9 +4,38 @@
 >
 > 一个开源、多源、多语言的诗歌数据工程：把散落各处的诗歌语料汇入同一条江河，
 > 并提供可直接使用的离线库与开放接口。
+>
+> **From pre-Qin to the present — Chinese first, then the world.**
+>
+> An open, multi-source poetry data pipeline: normalize scattered corpora into one river,
+> and ship a usable offline database plus open interfaces.
 
 取名自汉乐府《长歌行》：「**百川东到海，何时复西归**」——各朝代、各国语言的诗歌，
 像江河一样汇入一个海。
+
+---
+
+## English overview
+
+**Baichuan** (“a hundred rivers”) is an open-source **Chinese poetry data engineering** project: multi-source ingest, validation, dedup, indexing, and a queryable offline SQLite DB.
+
+| | Figure (from `baichuan.db`) |
+|---|---|
+| Poems (Simplified / Traditional, same ids) | **993,753** each |
+| Authors | 30,249 |
+| Alias groups | 241 rows / 33 groups |
+
+**Sources (MIT only since v0.2.0):** [chinese-poetry](https://github.com/chinese-poetry/chinese-poetry), [Werneror/Poetry](https://github.com/Werneror/Poetry). The v0.1.0 GPL-3.0 `poetry.db` dist artifact was **removed in v0.2.0**; rebuild is from MIT JSON/CSV only. See [NOTICE.md](NOTICE.md).
+
+**What we fix that most dumps don’t:** dynasty/genre axis mixups, Simplified/Traditional id skew, systematic mislabels (e.g. Song poems filed as Tang), South Tang authors, alias resolution (陶渊明 ↔ 陶潜), optional FTS5 search.
+
+**Public API lives in sibling repo** [诗文树 poetry-tree](https://github.com/liuliuwenzheng/poetry-tree) — Baichuan is its Chinese data-source adapter.
+
+**Quick start (build):** fetch upstreams → `tools/ingest.py` → `tools/build_aliases.py` → optional `tools/build_search.py` → `query/poem.py`. Download a prebuilt DB from [Releases](https://github.com/liuliuwenzheng/baichuan-poetry/releases/latest) if you only need to query.
+
+**License:** project code MIT; texts follow upstream MIT. We claim no copyright on the poems themselves.
+
+Full Chinese documentation below (schema, findings, genre × dynasty tables, errata).
 
 ---
 
@@ -23,7 +52,7 @@
 
 - **未使用任何第三方代码**；本仓库的 `tools/` 与 `query/` 均为原创实现。
 - v0.1.0 的唐宋部分导入自 `poetry.db`（GPL-3.0 项目的 dist 产物）。GPL 对「程序输出」
-  的适用性有争议，**为消除歧义，v0.2.0 将直接从 MIT 原始数据（chinese-poetry 的 JSON）
+  的适用性有争议，**为消除歧义，v0.2.0 已直接从 MIT 原始数据（chinese-poetry 的 JSON）
   重建，完全绕开该产物**。
 - 完整版权声明、许可全文、引用方式 → **[NOTICE.md](NOTICE.md)**
 
